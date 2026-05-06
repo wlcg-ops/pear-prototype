@@ -31,7 +31,7 @@ spec:
                 - "/var/spool/apel/grid/incoming"
                 - "-m"
                 - "15"
-                - "--lhc-only"
+                # - "--lhc-only"
                 - "--publish"
               env:
                 - name: MQ_USERNAME
