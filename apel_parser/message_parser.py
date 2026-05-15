@@ -130,7 +130,7 @@ class APELMessageParser:
         
         rcsite = self.cric_data[site_name]
         
-        country = rcsite.get("country_code", constants.UNKNOWN)
+        country = rcsite.get("country_code") or constants.UNKNOWN
         
         if vo.lower() in constants.LHC_VOS:
             tier_level = rcsite.get("rc_tier_level")
@@ -156,7 +156,7 @@ class APELMessageParser:
             tier = constants.NON_WLCG_TIER
             federation = constants.NON_WLCG_FEDERATION
 
-        roc = rcsite.get("roc", constants.UNKNOWN)
+        roc = rcsite.get("roc") or constants.UNKNOWN
         
         return {"tier": tier, "country": country, "federation": federation, "roc": roc}
 
