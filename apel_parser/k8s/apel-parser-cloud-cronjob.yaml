@@ -3,7 +3,8 @@ kind: CronJob
 metadata:
   name: apel-parser-cloud
 spec:
-  schedule: "30 8 * * *"
+  schedule: "30 01,10,16 * * *"
+  timeZone: "Europe/Zurich"
   concurrencyPolicy: Allow
   failedJobsHistoryLimit: 1
   successfulJobsHistoryLimit: 3
