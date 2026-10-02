@@ -3,7 +3,7 @@ from typing import Final
 
 
 # ==============================================================================
-# CONSUMED MESSAGES - APEL
+# APEL - CONSUMED MESSAGES
 # ==============================================================================
 
 DEFAULT_MESSAGES_DIR: Final[str] = "/var/spool/apel/grid/incoming"
@@ -15,7 +15,7 @@ APEL_DIRQ_SCHEMA: Final[dict[str, str]] = {
 }
 
 # ==============================================================================
-# TOPOLOGY DATA
+# SITE TOPOLOGY
 # ==============================================================================
 
 CRIC_RCSITE_API: Final[str] = "https://wlcg-cric.cern.ch/api/core/rcsite/query/?json&state=ANY"
@@ -55,6 +55,19 @@ NON_WLCG_FEDERATION: Final[str] = "NON-WLCG-Federation"
 # PRODUCED ACCOUNTING DATA
 # ==============================================================================
 
+INFLUXDB_DATABASE: Final[str] = os.getenv("INFLUXDB_DATABASE")
+INFLUXDB_MEASUREMENT: Final[str] = os.getenv("INFLUXDB_MEASUREMENT")
+
+INFLUXDB_TAGS: Final[list[str]] = [
+    "vo", "tier", "country", "federation", "site", "infra", "benchmark", "ngi"
+]
+INFLUXDB_SITE_TOPOLOGY_TAGS: Final[list[str]] = ["tier", "country", "federation", "ngi"]
+INFLUXDB_SERIES_IDENTITY_TAGS: Final[list[str]] = [
+    tag for tag in INFLUXDB_TAGS if tag not in INFLUXDB_SITE_TOPOLOGY_TAGS
+]
+if unknown_tags := set(INFLUXDB_SITE_TOPOLOGY_TAGS) - set(INFLUXDB_TAGS):
+    raise RuntimeError(f"INFLUXDB_SITE_TOPOLOGY_TAGS contains unknown tags: {sorted(unknown_tags)}")
+
 GRID_INFRA: Final[str] = "Grid"
 GRID_LOCAL_INFRA: Final[str] = "Grid-Local"
 CLOUD_INFRA: Final[str] = "Cloud"
@@ -89,10 +102,6 @@ CLOUD_ONLY_ACCOUNTING_FIELDS: Final[list[str]] = [
 SITE_METADATA_FIELDS: Final[list[str]] = [
 ]
 
-INFLUXDB_TAGS: Final[list[str]] = [
-    "vo", "tier", "country", "federation", "site", "infra", "benchmark", "ngi"
-]
-
 PRODUCED_DOC_METADATA_FIELDS: Final[list[str]] = [
     "idb_tags",
     "producer",
@@ -118,7 +127,7 @@ PRODUCED_DOC_FIELDS: Final[dict[str, list[str]]] = {
 }
 
 # ==============================================================================
-# PUBLISHED MESSAGES - MONIT
+# MONIT - PUBLISHED MESSAGES & STORED ACCOUNTING DATA
 # ==============================================================================
 
 MQ_CONFIG: Final[dict[str, str | None]] = {
@@ -127,6 +136,9 @@ MQ_CONFIG: Final[dict[str, str | None]] = {
     "username": os.getenv("MQ_USERNAME"),
     "password": os.getenv("MQ_PASSWORD"),
 }
-MESSAGE_TOPIC: Final[str] = os.getenv("MESSAGE_TOPIC")
-MESSAGE_PRODUCER: Final[str] = os.getenv("MESSAGE_PRODUCER")
-MESSAGE_INFLUXDB_MEASUREMENT: Final[str] = os.getenv("MESSAGE_INFLUXDB_MEASUREMENT")
+MESSAGE_TOPIC: Final[str | None] = os.getenv("MESSAGE_TOPIC")
+MESSAGE_PRODUCER: Final[str | None] = os.getenv("MESSAGE_PRODUCER")
+
+MONIT_DATASOURCES_TOKEN: Final[str] = os.getenv("MONIT_DATASOURCES_TOKEN")
+MONIT_DATASOURCES_API: Final[str] = os.getenv("MONIT_DATASOURCES_API")
+MONIT_REQUEST_TIMEOUT_SECONDS: Final[int] = 30
