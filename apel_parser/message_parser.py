@@ -10,10 +10,20 @@ from typing import Any, Iterator, NotRequired, TypedDict
 
 try:  # Package imports
     from . import constants
-    from .tools import fetch_cric_topology, publish
+    from .tools import (
+        fetch_cric_topology,
+        fetch_historical_topology,
+        format_timestamp,
+        publish,
+    )
 except ImportError:  # Script-style imports
     import constants
-    from tools import fetch_cric_topology, publish
+    from tools import (
+        fetch_cric_topology,
+        fetch_historical_topology,
+        format_timestamp,
+        publish,
+    )
 
 from dateutil.relativedelta import relativedelta
 from dirq.queue import Queue
@@ -114,8 +124,6 @@ class APELMessageParser:
         self.config = config
         self.cutoff = date.today().replace(day=1) - relativedelta(months=max(config.months, 1) - 1)
         self.cric_data = fetch_cric_topology()
-        if not self.cric_data:
-            LOG.warning("CRIC topology is empty; site enrichment may be incomplete")
         self.warned_sites: set[str] = set()
 
     @staticmethod
@@ -363,6 +371,23 @@ class APELMessageParser:
         """Build aggregate bucket key from the canonical InfluxDB tag set."""
         return tuple(str(record[tag]) for tag in constants.INFLUXDB_TAGS)
 
+    @staticmethod
+    def _timestamp(year: int, month: int) -> int:
+        """Return the exact UTC timestamp emitted for an accounting month."""
+        dt = datetime(year, month, 1, tzinfo=timezone.utc)
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return int((dt - epoch).total_seconds() * 1000)
+
+    @staticmethod
+    def _historical_lookup_key(
+        entry: dict[str, Any], year: int, month: int
+    ) -> tuple[int, tuple[str, ...]]:
+        """Build the entry key used to find stored topology metadata for it."""
+        return (
+            APELMessageParser._timestamp(year, month),
+            tuple(str(entry[tag]) for tag in constants.INFLUXDB_SERIES_IDENTITY_TAGS),
+        )
+
     def _extract_record(self, rec: dict[str, str], msgid: str) -> ParsedAccountingRecord | None:
         """Dispatch extraction based on the parser infra type selected from CLI."""
         if self.config.infra_type == constants.GRID_INFRA:
@@ -477,9 +502,7 @@ class APELMessageParser:
         with_ce: bool = False,
     ) -> list[OrderedDict[str, Any]]:
         """Turn an accumulated bucket into the JSON document list matching ACC.py schema."""
-        dt = datetime(year, month, 1, tzinfo=timezone.utc)
-        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        timestamp = int((dt - epoch).total_seconds() * 1000)
+        timestamp = APELMessageParser._timestamp(year, month)
 
         idb_tags = list(constants.INFLUXDB_TAGS)
         produced_doc_fields = list(constants.PRODUCED_DOC_FIELDS[infra_type])
@@ -500,7 +523,7 @@ class APELMessageParser:
                 elif key == "producer":
                     doc[key] = constants.MESSAGE_PRODUCER
                 elif key == "type":
-                    doc[key] = constants.MESSAGE_INFLUXDB_MEASUREMENT
+                    doc[key] = constants.INFLUXDB_MEASUREMENT
                 elif key == "timestamp":
                     doc[key] = timestamp
                 elif key == "raw_cpu_eff":
@@ -509,6 +532,63 @@ class APELMessageParser:
                     doc[key] = entry.get(key, 0)
             docs.append(doc)
         return docs
+
+    def resolve_historical_topology(
+        self, agg: dict[MonthKey, Bucket], per_ce: dict[MonthKey, Bucket] | None
+    ) -> None:
+        """Apply stored site topology to entries that already exist in InfluxDB.
+
+        Entries are updated in place. An entry takes the stored site topology when
+        exactly one stored point matches its time and series identity tags;
+        otherwise it keeps its current CRIC topology. This keeps allows backfilling to 
+        only update stored accounting metrics and not site topology.
+        """
+        if not agg:
+            return
+
+        buckets = [agg]
+        if per_ce is not None:
+            buckets.append(per_ce)
+
+        timestamps = [self._timestamp(year, month) for year, month in agg]
+        historical_topology = fetch_historical_topology(min(timestamps), max(timestamps))
+
+        resolution_outcomes = {
+            "used_current_no_stored": 0,
+            "used_current_ambiguous_stored": 0,
+            "used_stored": 0,
+        }
+        for buckets_by_month in buckets:
+            for (year, month), bucket in buckets_by_month.items():
+                for entry in bucket.values():
+                    lookup_key = self._historical_lookup_key(entry, year, month)
+                    stored_topologies = historical_topology.get(lookup_key, [])
+                    if not stored_topologies:
+                        outcome = "used_current_no_stored"
+                    elif len(stored_topologies) > 1:
+                        outcome = "used_current_ambiguous_stored"
+                    else:
+                        outcome = "used_stored"
+                        for tag, value in zip(
+                            constants.INFLUXDB_SITE_TOPOLOGY_TAGS,
+                            stored_topologies[0],
+                        ):
+                            entry[tag] = value
+
+                    # Count/Log only normal aggregated entries; per-CE entries mirror them.
+                    if buckets_by_month is agg:
+                        resolution_outcomes[outcome] += 1
+                        if outcome == "used_current_ambiguous_stored":
+                            timestamp, identity = lookup_key
+                            LOG.debug(
+                                f"Ambiguous stored topology for {format_timestamp(timestamp)} "
+                                f"{identity}: {stored_topologies}"
+                            )
+
+        LOG.info(
+            f'Historical topology resolution outcomes: '
+            f'{", ".join(f"{outcome}={count}" for outcome, count in resolution_outcomes.items())}'
+        )
 
     def write_outputs(
         self, agg: dict[MonthKey, Bucket], per_ce: dict[MonthKey, Bucket] | None
@@ -547,6 +627,7 @@ class APELMessageParser:
 
         try:
             agg, per_ce = self.ingest(locked_messages)
+            self.resolve_historical_topology(agg, per_ce)
             self.write_outputs(agg, per_ce)
         except Exception:
             for msgid in locked_msgids:

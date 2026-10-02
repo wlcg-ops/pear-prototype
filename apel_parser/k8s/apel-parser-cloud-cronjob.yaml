@@ -38,6 +38,24 @@ spec:
               env:
                 - name: IGTF_TRUST_BUNDLE_PATH
                   value: "/cvmfs/grid.cern.ch/etc/grid-security/certificates"
+                - name: INFLUXDB_DATABASE
+                  value: "monit_production_wlcgops"
+                - name: INFLUXDB_MEASUREMENT
+                  value: "accounting.wau.summary_apel_8"
+                - name: MONIT_DATASOURCES_API
+                  valueFrom:
+                    secretKeyRef:
+                      name: monit-datasources-creds
+                      key: api
+                - name: MONIT_DATASOURCES_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: monit-datasources-creds
+                      key: token
+                - name: MESSAGE_TOPIC
+                  value: "wlcgops.accounting.space"
+                - name: MESSAGE_PRODUCER
+                  value: "wlcgops"
                 - name: MQ_USERNAME
                   valueFrom:
                     secretKeyRef:
@@ -58,12 +76,6 @@ spec:
                     secretKeyRef:
                       name: mq-creds
                       key: port
-                - name: MESSAGE_TOPIC
-                  value: "wlcgops.accounting.space"
-                - name: MESSAGE_PRODUCER
-                  value: "wlcgops"
-                - name: MESSAGE_INFLUXDB_MEASUREMENT
-                  value: "accounting.wau.summary_apel_8"
               volumeMounts:
                 - name: apel-consumer-output
                   mountPath: /var/spool/apel

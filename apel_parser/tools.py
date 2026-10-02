@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from csv import DictReader, Error as CSVError
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -17,7 +19,7 @@ try:  # Package imports
 except ImportError:  # Script-style imports
     import constants
 
-_logger = logging.getLogger("apel_parser.publisher")
+_logger = logging.getLogger("apel_parser.tools")
 
 
 class Publisher:
@@ -84,6 +86,114 @@ class PublishConfigError(RuntimeError):
     """Raised when required publishing configuration is missing."""
 
 
+class CricTopologyLookupError(RuntimeError):
+    """Raised when CRIC site topology cannot be obtained."""
+
+
+class HistoricalTopologyLookupError(RuntimeError):
+    """Raised when historical site topology cannot be obtained safely."""
+
+
+def format_timestamp(timestamp_ms: int) -> str:
+    """Return a millisecond epoch timestamp as a human-readable UTC string."""
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_historical_topology(
+    earliest_timestamp: int,
+    latest_timestamp: int,
+) -> dict[tuple[int, tuple[str, ...]], list[tuple[str, ...]]]:
+    """Fetch the site topology of accounting points already stored in InfluxDB.
+
+    Queries the InfluxDB measurement and maps each (timestamp_ms, series identity tags) key
+    to the list of site topology tag tuples found for it. More than one tuple means the key
+    has duplicate series.
+    """
+    required_config = {
+        "INFLUXDB_DATABASE": constants.INFLUXDB_DATABASE,
+        "INFLUXDB_MEASUREMENT": constants.INFLUXDB_MEASUREMENT,
+        "MONIT_DATASOURCES_API": constants.MONIT_DATASOURCES_API,
+        "MONIT_DATASOURCES_TOKEN": constants.MONIT_DATASOURCES_TOKEN,
+    }
+    if missing_config := [name for name, value in required_config.items() if not value]:
+        raise HistoricalTopologyLookupError(
+            f"Missing required environment variables: {', '.join(missing_config)}"
+        )
+
+    select_columns = (
+        constants.INFLUXDB_SERIES_IDENTITY_TAGS
+        + constants.INFLUXDB_SITE_TOPOLOGY_TAGS
+        + [constants.COMMON_ACCOUNTING_FIELDS[0]]  # at least one field required by InfluxQL
+    )
+    select_columns_string = ", ".join(column for column in select_columns)
+    earliest_timestamp = int(earliest_timestamp)
+    latest_timestamp = int(latest_timestamp)
+    if earliest_timestamp > latest_timestamp:
+        raise HistoricalTopologyLookupError(
+            f"Invalid historical topology time range: "
+            f"{format_timestamp(earliest_timestamp)} > {format_timestamp(latest_timestamp)}"
+        )
+    time_range = f"{format_timestamp(earliest_timestamp)} to {format_timestamp(latest_timestamp)}"
+    query = f'''
+        SELECT {select_columns_string}
+        FROM "{constants.INFLUXDB_MEASUREMENT}"
+        WHERE time >= {earliest_timestamp}ms AND time <= {latest_timestamp}ms
+    '''
+
+    try:
+        with requests.get(
+            constants.MONIT_DATASOURCES_API,
+            params={"db": constants.INFLUXDB_DATABASE, "q": query},
+            headers={
+                "Accept": "application/csv",
+                "Authorization": f"Bearer {constants.MONIT_DATASOURCES_TOKEN}",
+            },
+            timeout=constants.MONIT_REQUEST_TIMEOUT_SECONDS,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            response.encoding = "utf-8"
+
+            reader = DictReader(response.iter_lines(decode_unicode=True))
+            if not reader.fieldnames:
+                _logger.info(
+                    f"Fetched 0 stored topology points from {constants.INFLUXDB_MEASUREMENT} "
+                    f"for {time_range}"
+                )
+                return {}
+            # InfluxDB reports query errors with HTTP 200 as a CSV body containing a single "error" column.
+            if "error" in reader.fieldnames:
+                raise HistoricalTopologyLookupError(
+                    f"Historical topology query failed for {time_range}: "
+                    f"{next(reader, {}).get('error')}"
+                )
+            expected_columns = {"time", *select_columns}
+            if missing_columns := expected_columns - set(reader.fieldnames):
+                raise HistoricalTopologyLookupError(
+                    f"Unexpected historical topology response, missing CSV columns: {sorted(missing_columns)}"
+                )
+
+            topology: dict[tuple[int, tuple[str, ...]], list[tuple[str, ...]]] = {}
+            for row in reader:
+                key = (
+                    int(row["time"]) // 1_000_000,
+                    tuple(row[tag] for tag in constants.INFLUXDB_SERIES_IDENTITY_TAGS),
+                )
+                topology.setdefault(key, []).append(
+                    tuple(row[tag] for tag in constants.INFLUXDB_SITE_TOPOLOGY_TAGS)
+                )
+        _logger.info(
+            f"Fetched {sum(len(records) for records in topology.values())} stored topology points "
+            f"({len(topology)} distinct lookup keys) from {constants.INFLUXDB_MEASUREMENT} "
+            f"for {time_range}"
+        )
+        return topology
+    except (requests.RequestException, CSVError, KeyError, TypeError, ValueError) as error:
+        raise HistoricalTopologyLookupError(
+            f"Historical topology lookup failed for {time_range}: {error}"
+        ) from error
+
+
 def publish(file_path: str | Path) -> None:
     """Publish accounting data from a JSON file to the message broker."""
     mq_config = constants.MQ_CONFIG
@@ -115,13 +225,13 @@ def fetch_cric_topology(api: str | None = None) -> dict[str, Any]:
         )
         response.raise_for_status()
         payload = response.json()
-        if not isinstance(payload, dict):
-            _logger.error("Unexpected CRIC payload type %s from %s", type(payload).__name__, target_api)
-            return {}
-        return payload
-    except requests.exceptions.RequestException as req_err:
-        _logger.error("Failed to fetch CRIC topology from %s: %s", target_api, req_err)
-        return {}
-    except ValueError as json_err:
-        _logger.error("Invalid JSON from CRIC topology endpoint %s: %s", target_api, json_err)
-        return {}
+    except (requests.RequestException, ValueError) as error:
+        raise CricTopologyLookupError(
+            f"CRIC topology lookup from {target_api} failed: {error}"
+        ) from error
+
+    if not isinstance(payload, dict) or not payload:
+        raise CricTopologyLookupError(
+            f"CRIC topology from {target_api} is empty or not a JSON object"
+        )
+    return payload
